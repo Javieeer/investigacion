@@ -10,6 +10,7 @@ let pollHandle = null;
 let clockHandle = null;
 let currentAdminState = null;
 let setupDirty = false;
+let preparationExpanded = false;
 let stationEditorExpanded = false;
 let currentUserId = null;
 let stateRefreshPending = false;
@@ -508,31 +509,34 @@ function renderAdmin(state) {
                         <div class="timer-station-list">${state.stations.map((station) => renderStationTimer(team, station, state)).join("")}</div>
                     </article>`).join("")}</div>
             </section>
-            <section class="setup-section">
-                <div class="section-heading"><div><div class="section-kicker">03 · PREPARACIÓN</div><h2>Temas, estaciones y pistas</h2><p>Crea pistas útiles para el tema de cada grupo y la sección que están trabajando.</p></div><button class="button button-dark" id="save-setup">Guardar preparación <span>↓</span></button></div>
-                <div class="teams-setup">${state.teams.map((team) => renderTeamSetup(team, state.stations)).join("")}</div>
-                <details class="station-setup" id="station-setup-details" ${stationEditorExpanded ? "open" : ""}>
-                    <summary class="subsection-title"><h3>Estaciones</h3><span>5 paradas · editables</span></summary>
-                    <div class="station-editor-list">${state.stations.map((station) => `
-                        <article class="station-editor">
-                            <span class="station-number">${String(station.sort_order).padStart(2, "0")}</span>
-                            <div class="station-fields">
-                                <label>Nombre de la estación<input class="station-name" data-id="${station.id}" value="${escapeHtml(station.name)}"></label>
-                                <label>Formato creativo<input class="station-format" data-id="${station.id}" value="${escapeHtml(station.format)}"></label>
-                                <label>Pregunta para quien facilita<textarea class="station-question" data-id="${station.id}" rows="2">${escapeHtml(station.facilitator_question)}</textarea></label>
-                                <label class="quiz-question-label">Pregunta para el grupo<textarea class="quiz-question" data-id="${station.id}" rows="2">${escapeHtml(station.question)}</textarea></label>
-                                ${[0, 1, 2, 3].map((index) => `<label>Opción ${String.fromCharCode(65 + index)}<input class="quiz-option" data-id="${station.id}" data-option="${index}" value="${escapeHtml(station.options[index] || "")}"></label>`).join("")}
-                                <label>Respuesta correcta
-                                    <select class="quiz-correct" data-id="${station.id}">
-                                        <option value="" ${station.correct_option === null ? "selected" : ""}>Selecciona la correcta</option>
-                                        ${[0, 1, 2, 3].map((index) => `<option value="${index}" ${station.correct_option === index ? "selected" : ""}>Opción ${String.fromCharCode(65 + index)}</option>`).join("")}
-                                    </select>
-                                </label>
-                            </div>
-                        </article>`).join("")}
-                    </div>
-                </details>
-            </section>
+            <details class="setup-section" id="preparation-details" ${preparationExpanded ? "open" : ""}>
+                <summary class="section-heading preparation-heading"><div><div class="section-kicker">03 · PREPARACIÓN</div><h2>Temas, estaciones y pistas</h2><p>Crea pistas útiles para el tema de cada grupo y la sección que están trabajando.</p></div></summary>
+                <div class="preparation-content">
+                    <div class="preparation-actions"><button class="button button-dark" id="save-setup">Guardar preparación <span>↓</span></button></div>
+                    <div class="teams-setup">${state.teams.map((team) => renderTeamSetup(team, state.stations)).join("")}</div>
+                    <details class="station-setup" id="station-setup-details" ${stationEditorExpanded ? "open" : ""}>
+                        <summary class="subsection-title"><h3>Estaciones</h3><span>5 paradas · editables</span></summary>
+                        <div class="station-editor-list">${state.stations.map((station) => `
+                            <article class="station-editor">
+                                <span class="station-number">${String(station.sort_order).padStart(2, "0")}</span>
+                                <div class="station-fields">
+                                    <label>Nombre de la estación<input class="station-name" data-id="${station.id}" value="${escapeHtml(station.name)}"></label>
+                                    <label>Formato creativo<input class="station-format" data-id="${station.id}" value="${escapeHtml(station.format)}"></label>
+                                    <label>Pregunta para quien facilita<textarea class="station-question" data-id="${station.id}" rows="2">${escapeHtml(station.facilitator_question)}</textarea></label>
+                                    <label class="quiz-question-label">Pregunta para el grupo<textarea class="quiz-question" data-id="${station.id}" rows="2">${escapeHtml(station.question)}</textarea></label>
+                                    ${[0, 1, 2, 3].map((index) => `<label>Opción ${String.fromCharCode(65 + index)}<input class="quiz-option" data-id="${station.id}" data-option="${index}" value="${escapeHtml(station.options[index] || "")}"></label>`).join("")}
+                                    <label>Respuesta correcta
+                                        <select class="quiz-correct" data-id="${station.id}">
+                                            <option value="" ${station.correct_option === null ? "selected" : ""}>Selecciona la correcta</option>
+                                            ${[0, 1, 2, 3].map((index) => `<option value="${index}" ${station.correct_option === index ? "selected" : ""}>Opción ${String.fromCharCode(65 + index)}</option>`).join("")}
+                                        </select>
+                                    </label>
+                                </div>
+                            </article>`).join("")}
+                        </div>
+                    </details>
+                </div>
+            </details>
             <section class="release-section">
                 <div class="section-heading"><div><div class="section-kicker">04 · ENTREGA DE PISTAS</div><h2>Libera cuando respondan bien</h2><p>La pista aparece al instante en la vista del grupo correspondiente.</p></div></div>
                 <div class="release-grid">${state.teams.map((team) => `
@@ -571,11 +575,16 @@ function renderAdmin(state) {
             renderLogin();
         } catch (error) { notify(error.message, "error"); }
     });
+    const preparationDetails = document.querySelector("#preparation-details");
+    preparationDetails.addEventListener("toggle", () => {
+        preparationExpanded = preparationDetails.open;
+    });
     const stationDetails = document.querySelector("#station-setup-details");
     stationDetails.addEventListener("toggle", () => {
         stationEditorExpanded = stationDetails.open;
     });
-    document.querySelector("#save-setup").addEventListener("click", saveSetup);
+    const saveSetupButton = document.querySelector("#save-setup");
+    if (saveSetupButton) saveSetupButton.addEventListener("click", saveSetup);
     document.querySelectorAll("#reset-button, #reset-button-bottom").forEach((button) => button.addEventListener("click", resetProgress));
     document.querySelectorAll("[data-create-timer]").forEach((button) => button.addEventListener("click", async () => {
         const minutes = Number(document.querySelector("#new-timer-duration").value);

@@ -98,6 +98,12 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
 .section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
 .section-heading h2 { margin: 7px 0 5px; font-size: 24px; letter-spacing: -.04em; }
 .section-heading p { margin: 0; color: var(--muted); font-size: 12px; }
+.preparation-heading { list-style: none; cursor: pointer; }
+.preparation-heading::-webkit-details-marker { display: none; }
+.preparation-heading::after { margin-left: auto; color: var(--green); content: "+"; font-size: 22px; font-weight: 700; }
+#preparation-details[open] > .preparation-heading::after { content: "−"; }
+.preparation-heading:focus-visible { border-radius: 5px; outline: 2px solid #77937c; outline-offset: 4px; }
+.preparation-actions { display: flex; justify-content: flex-end; margin-bottom: 18px; }
 .teams-setup { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
 .team-setup-card, .release-card { min-width: 0; border: 1px solid var(--line); border-top: 3px solid var(--team-color); border-radius: 12px; background: var(--card); padding: 16px; }
 .team-setup-heading, .release-team { display: flex; align-items: center; gap: 8px; margin-bottom: 15px; }
