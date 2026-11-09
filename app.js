@@ -10,9 +10,13 @@ let pollHandle = null;
 let clockHandle = null;
 let currentAdminState = null;
 let setupDirty = false;
-let timerDeadline = 0;
-let timerRemaining = 0;
-let timerRunning = false;
+let stationEditorExpanded = false;
+let currentUserId = null;
+let stateRefreshPending = false;
+let realtimeChannel = null;
+let serverTimeOffsetMs = 0;
+
+const currentTimeMs = () => Date.now() + serverTimeOffsetMs;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
     "&": "&amp;",
@@ -28,31 +32,35 @@ async function api(action, payload = null, query = {}) {
     }
 
     const checked = ({ data, error }) => {
-        if (error) throw new Error(error.message);
+        if (error) {
+            if (error.code === "23505") throw new Error("Ya existe un temporizador para ese grupo en esa estación.");
+            throw new Error(error.message);
+        }
         return data;
     };
     const runQuery = async (request) => checked(await request);
+    const getServerTime = async () => {
+        const requestStartedAt = Date.now();
+        const serverNow = checked(await supabaseClient.rpc("get_server_time"));
+        const responseReceivedAt = Date.now();
+        const timestamp = Date.parse(serverNow);
+        if (Number.isFinite(timestamp)) {
+            serverTimeOffsetMs = timestamp - (requestStartedAt + responseReceivedAt) / 2;
+        }
+        return serverNow;
+    };
     const getAdminStatus = async () => {
         const session = checked(await supabaseClient.auth.getSession()).session;
-        if (!session) return { is_admin: false };
+        if (!session) {
+            currentUserId = null;
+            return { is_admin: false, user_id: null };
+        }
         const admins = checked(await supabaseClient.from("admin_users").select("user_id").eq("user_id", session.user.id));
-        return { is_admin: admins.length > 0 };
-    };
-    const getTimer = async () => {
-        const row = checked(await supabaseClient.from("dynamics").select("*").eq("id", 1).single());
-        const remaining = row.is_running && row.ends_at
-            ? Math.max(0, Math.ceil((Date.parse(row.ends_at) - Date.now()) / 1000))
-            : Number(row.remaining_seconds);
-        return {
-            duration_seconds: Number(row.duration_seconds),
-            remaining_seconds: remaining,
-            is_running: Boolean(row.is_running) && remaining > 0,
-            active_team: row.active_team,
-            active_station: row.active_station === null ? null : Number(row.active_station),
-        };
+        currentUserId = session.user.id;
+        return { is_admin: admins.length > 0, user_id: currentUserId };
     };
     const getAdminState = async () => {
-        const [teams, stations, questions, answers, hints, releases, access, requests, timer] = await Promise.all([
+        const [teams, stations, questions, answers, hints, releases, access, requests, timers] = await Promise.all([
             runQuery(supabaseClient.from("teams").select("*").order("sort_order")),
             runQuery(supabaseClient.from("stations").select("*").order("sort_order")),
             runQuery(supabaseClient.from("station_questions").select("*")),
@@ -61,7 +69,8 @@ async function api(action, payload = null, query = {}) {
             runQuery(supabaseClient.from("hint_releases").select("*")),
             runQuery(supabaseClient.from("hint_access").select("*")),
             runQuery(supabaseClient.from("hint_requests").select("*")),
-            getTimer(),
+            runQuery(supabaseClient.from("station_timers").select("*")),
+            getServerTime(),
         ]);
         for (const station of stations) {
             station.question = questions.find((item) => Number(item.station_id) === Number(station.id))?.question || "";
@@ -84,7 +93,7 @@ async function api(action, payload = null, query = {}) {
                 };
             }
         }
-        return { teams, stations, timer, is_admin: true };
+        return { teams, stations, timers, is_admin: true, current_user_id: currentUserId };
     };
 
     if (action === "admin_status") return getAdminStatus();
@@ -104,18 +113,18 @@ async function api(action, payload = null, query = {}) {
         if (adminStatus.is_admin && !query.color) return getAdminState();
         const team = checked(await supabaseClient.from("teams").select("*").eq("slug", query.color || "").maybeSingle());
         if (!team) throw new Error("No encontramos ese grupo.");
-        const [stations, questions, releases, hints, access, requests, timer] = await Promise.all([
+        const [stations, questions, releases, hints, access, requests, timers] = await Promise.all([
             runQuery(supabaseClient.from("stations").select("*").order("sort_order")),
             runQuery(supabaseClient.from("station_questions").select("*").eq("team_slug", team.slug)),
             runQuery(supabaseClient.from("hint_releases").select("*").eq("team_slug", team.slug)),
             runQuery(supabaseClient.from("hints").select("*").eq("team_slug", team.slug)),
             runQuery(supabaseClient.from("hint_access").select("*").eq("team_slug", team.slug)),
             runQuery(supabaseClient.from("hint_requests").select("*").eq("team_slug", team.slug)),
-            getTimer(),
+            runQuery(supabaseClient.from("station_timer_status").select("*").eq("team_slug", team.slug)),
+            getServerTime(),
         ]);
         return {
             team,
-            timer,
             stations: stations.map((station) => {
                 const release = releases.find((item) => Number(item.station_id) === Number(station.id));
                 const hint = hints.find((item) => Number(item.station_id) === Number(station.id));
@@ -131,6 +140,7 @@ async function api(action, payload = null, query = {}) {
                     hint_requested: Boolean(request?.requested),
                     hint: release?.is_unlocked ? hint?.content || "" : "",
                     is_unlocked: Boolean(release?.is_unlocked),
+                    timer: timers.find((item) => Number(item.station_id) === Number(station.id)) || null,
                 };
             }),
         };
@@ -153,6 +163,50 @@ async function api(action, payload = null, query = {}) {
     const adminStatus = await getAdminStatus();
     if (!adminStatus.is_admin) throw new Error("Inicia sesión como amarillo para realizar esta acción.");
 
+    if (action === "create_station_timer") {
+        const duration = Number(payload.duration_seconds);
+        if (!Number.isInteger(duration) || duration < 60 || duration > 3600) {
+            throw new Error("Elige una duración entre 1 y 60 minutos.");
+        }
+        checked(await supabaseClient.from("station_timers").insert({
+            team_slug: payload.team_slug,
+            station_id: Number(payload.station_id),
+            created_by: adminStatus.user_id,
+            duration_seconds: duration,
+            remaining_seconds: duration,
+        }));
+        return { ok: true };
+    }
+    if (action === "station_timer") {
+        const timer = checked(await supabaseClient.from("station_timers").select("*").eq("id", payload.id).single());
+        const now = currentTimeMs();
+        let changes;
+        if (payload.operation === "start") {
+            const remaining = timer.is_running && timer.ends_at
+                ? Math.max(0, Math.ceil((Date.parse(timer.ends_at) - now) / 1000))
+                : Number(timer.remaining_seconds);
+            changes = {
+                remaining_seconds: remaining,
+                ends_at: remaining > 0 ? new Date(now + remaining * 1000).toISOString() : null,
+                is_running: remaining > 0,
+            };
+        } else if (payload.operation === "pause") {
+            const remaining = timer.is_running && timer.ends_at
+                ? Math.max(0, Math.ceil((Date.parse(timer.ends_at) - now) / 1000))
+                : Number(timer.remaining_seconds);
+            changes = { remaining_seconds: remaining, ends_at: null, is_running: false };
+        } else if (payload.operation === "reset") {
+            changes = { remaining_seconds: Number(timer.duration_seconds), ends_at: null, is_running: false };
+        } else {
+            throw new Error("Acción de temporizador desconocida.");
+        }
+        checked(await supabaseClient.from("station_timers").update(changes).eq("id", timer.id));
+        return { ok: true };
+    }
+    if (action === "delete_station_timer") {
+        checked(await supabaseClient.from("station_timers").delete().eq("id", payload.id));
+        return { ok: true };
+    }
     if (action === "save_setup") {
         for (const station of payload.stations || []) {
             if (!station.name.trim()) throw new Error("Cada estación debe tener un nombre.");
@@ -194,13 +248,6 @@ async function api(action, payload = null, query = {}) {
             .eq("team_slug", payload.team_slug).eq("station_id", payload.station_id));
         return { ok: true };
     }
-    if (action === "focus") {
-        checked(await supabaseClient.from("dynamics").update({
-            active_team: payload.team_slug,
-            active_station: payload.station_id,
-        }).eq("id", 1));
-        return { ok: true };
-    }
     if (action === "release_hint") {
         const hint = checked(await supabaseClient.from("hints").select("content")
             .eq("team_slug", payload.team_slug).eq("station_id", payload.station_id).maybeSingle());
@@ -218,55 +265,14 @@ async function api(action, payload = null, query = {}) {
         }).eq("team_slug", payload.team_slug).eq("station_id", payload.station_id));
         checked(await supabaseClient.from("hint_requests").update({ requested: false, requested_at: null })
             .eq("team_slug", payload.team_slug).eq("station_id", payload.station_id));
-        checked(await supabaseClient.from("dynamics").update({
-            active_team: payload.team_slug,
-            active_station: payload.station_id,
-        }).eq("id", 1));
-        return { ok: true };
-    }
-    if (action === "timer") {
-        const row = checked(await supabaseClient.from("dynamics").select("*").eq("id", 1).single());
-        const now = Date.now();
-        let changes;
-        if (payload.operation === "set") {
-            const duration = Math.max(60, Math.min(3600, Number(payload.duration_seconds) || 300));
-            changes = { duration_seconds: duration, remaining_seconds: duration, ends_at: null, is_running: false };
-        } else if (payload.operation === "start") {
-            const remaining = row.is_running && row.ends_at
-                ? Math.max(0, Math.ceil((Date.parse(row.ends_at) - now) / 1000))
-                : Number(row.remaining_seconds);
-            changes = {
-                remaining_seconds: remaining,
-                ends_at: remaining > 0 ? new Date(now + remaining * 1000).toISOString() : null,
-                is_running: remaining > 0,
-            };
-        } else if (payload.operation === "pause") {
-            const remaining = row.is_running && row.ends_at
-                ? Math.max(0, Math.ceil((Date.parse(row.ends_at) - now) / 1000))
-                : Number(row.remaining_seconds);
-            changes = { remaining_seconds: remaining, ends_at: null, is_running: false };
-        } else if (payload.operation === "reset") {
-            changes = { remaining_seconds: row.duration_seconds, ends_at: null, is_running: false };
-        } else {
-            throw new Error("Acción de temporizador desconocida.");
-        }
-        checked(await supabaseClient.from("dynamics").update(changes).eq("id", 1));
         return { ok: true };
     }
     if (action === "reset_progress") {
-        const timer = checked(await supabaseClient.from("dynamics").select("duration_seconds").eq("id", 1).single());
         checked(await supabaseClient.from("hint_releases").update({ is_unlocked: false, unlocked_at: null })
             .neq("team_slug", ""));
         checked(await supabaseClient.from("hint_requests").update({ requested: false, requested_at: null })
             .neq("team_slug", ""));
         checked(await supabaseClient.from("hint_access").update({ enabled: false }).neq("team_slug", ""));
-        checked(await supabaseClient.from("dynamics").update({
-            remaining_seconds: timer.duration_seconds,
-            ends_at: null,
-            is_running: false,
-            active_team: null,
-            active_station: null,
-        }).eq("id", 1));
         return { ok: true };
     }
     throw new Error("Acción desconocida.");
@@ -288,28 +294,93 @@ function formatTime(seconds) {
     return `${minutes}:${remainder}`;
 }
 
-function syncClock(timer) {
-    timerRemaining = Math.max(0, Number(timer.remaining_seconds) || 0);
-    timerRunning = Boolean(timer.is_running) && timerRemaining > 0;
-    timerDeadline = Date.now() + timerRemaining * 1000;
-    updateClocks();
-    if (clockHandle === null) clockHandle = window.setInterval(updateClocks, 250);
+function startTimerClocks() {
+    if (clockHandle !== null) return;
+    clockHandle = window.setInterval(() => {
+        document.querySelectorAll("[data-timer-clock]").forEach((clock) => {
+            if (clock.dataset.hasTimer !== "true") {
+                clock.textContent = "—:—";
+                const state = clock.parentElement.querySelector("[data-timer-state]");
+                if (state) state.textContent = "Aún no creado";
+                return;
+            }
+            const running = clock.dataset.running === "true";
+            const deadline = Date.parse(clock.dataset.endsAt || "");
+            const remaining = running && Number.isFinite(deadline)
+                ? Math.max(0, Math.ceil((deadline - currentTimeMs()) / 1000))
+                : Math.max(0, Number(clock.dataset.remainingSeconds) || 0);
+            clock.textContent = formatTime(remaining);
+            const state = clock.parentElement.querySelector("[data-timer-state]");
+            if (state) state.textContent = running && remaining > 0 ? "En marcha" : remaining === 0 ? "Tiempo terminado" : "En pausa";
+        });
+    }, 250);
 }
 
-function updateClocks() {
-    const remaining = timerRunning
-        ? Math.max(0, Math.ceil((timerDeadline - Date.now()) / 1000))
-        : timerRemaining;
-    if (remaining === 0) timerRunning = false;
-    const display = formatTime(remaining);
-    const adminTimer = document.querySelector("#admin-timer");
-    if (adminTimer) adminTimer.textContent = display;
-    const teamTimer = document.querySelector("#team-timer");
-    if (teamTimer) teamTimer.textContent = display;
-    const adminState = document.querySelector("#timer-state");
-    if (adminState) adminState.textContent = timerRunning ? "Temporizador en marcha" : remaining === 0 ? "Tiempo terminado" : "Temporizador detenido";
-    const teamState = document.querySelector("#team-timer-state");
-    if (teamState) teamState.textContent = timerRunning ? "Ronda en marcha" : remaining === 0 ? "Tiempo terminado" : "Ronda en pausa";
+function updateTimerClock(clock, timer) {
+    clock.dataset.hasTimer = String(Boolean(timer));
+    if (!timer) {
+        clock.textContent = "—:—";
+        const state = clock.parentElement.querySelector("[data-timer-state]");
+        if (state) state.textContent = "Aún no creado";
+        return;
+    }
+    const running = Boolean(timer?.is_running) && timer.ends_at && Date.parse(timer.ends_at) > currentTimeMs();
+    clock.dataset.running = String(Boolean(running));
+    clock.dataset.endsAt = timer?.ends_at || "";
+    clock.dataset.remainingSeconds = timer?.remaining_seconds || "0";
+    const remaining = running
+        ? Math.max(0, Math.ceil((Date.parse(timer.ends_at) - currentTimeMs()) / 1000))
+        : Math.max(0, Number(timer?.remaining_seconds) || 0);
+    clock.textContent = formatTime(remaining);
+    const state = clock.parentElement.querySelector("[data-timer-state]");
+    if (state) state.textContent = !timer ? "Aún no creado" : running && remaining > 0 ? "En marcha" : remaining === 0 ? "Tiempo terminado" : "En pausa";
+}
+
+async function refreshLiveState() {
+    if (stateRefreshPending) return;
+    stateRefreshPending = true;
+    try {
+        if (view === "amarillos") {
+            const state = await api("state");
+            const focused = ["TEXTAREA", "INPUT", "SELECT"].includes(document.activeElement?.tagName);
+            if (!setupDirty && !focused) renderAdmin(state);
+        } else if (view === "grupo") {
+            updateTeamView(await api("state", null, { color }));
+        }
+    } catch (error) {
+        if (view === "amarillos" && error.message.includes("Inicia sesión")) renderLogin();
+        else console.error("No se pudo actualizar la dinámica:", error);
+    } finally {
+        stateRefreshPending = false;
+    }
+}
+
+function stopLiveUpdates() {
+    if (pollHandle !== null) window.clearInterval(pollHandle);
+    pollHandle = null;
+    if (realtimeChannel) {
+        supabaseClient.removeChannel(realtimeChannel).then((status) => {
+            if (status !== "ok") console.error(`No se pudo cerrar el canal de Supabase Realtime (${status}).`);
+        }).catch((error) => console.error("No se pudo cerrar el canal de Supabase Realtime:", error));
+        realtimeChannel = null;
+    }
+}
+
+function startLiveUpdates() {
+    stopLiveUpdates();
+    pollHandle = window.setInterval(refreshLiveState, 5000);
+    realtimeChannel = supabaseClient
+        .channel("station-timer-status-changes")
+        .on("postgres_changes", {
+            event: "*",
+            schema: "public",
+            table: "station_timer_status",
+        }, refreshLiveState)
+        .subscribe((status) => {
+            if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+                console.error(`Supabase Realtime no está disponible (${status}); se usará la actualización periódica.`);
+            }
+        });
 }
 
 function renderLanding() {
@@ -380,13 +451,39 @@ function renderLogin(error = "") {
     });
 }
 
+function renderStationTimer(team, station, state) {
+    const timer = state.timers.find((item) => item.team_slug === team.slug && Number(item.station_id) === Number(station.id));
+    if (!timer) {
+        return `<div class="timer-station-row">
+            <span class="timer-station-name">${escapeHtml(station.name)}</span>
+            <button class="button button-small" data-create-timer="${escapeHtml(team.slug)}" data-station="${station.id}">Crear temporizador</button>
+        </div>`;
+    }
+
+    const remaining = timer.is_running && timer.ends_at
+        ? Math.max(0, Math.ceil((Date.parse(timer.ends_at) - currentTimeMs()) / 1000))
+        : Number(timer.remaining_seconds);
+    const running = Boolean(timer.is_running) && remaining > 0;
+    return `<div class="timer-station-row">
+        <div class="timer-station-info">
+            <span class="timer-station-name">${escapeHtml(station.name)}</span>
+            <strong class="station-timer-clock" data-timer-clock data-has-timer="true" data-running="${running}" data-ends-at="${escapeHtml(timer.ends_at || "")}" data-remaining-seconds="${remaining}">${formatTime(remaining)}</strong>
+            <small data-timer-state>${running ? "En marcha" : remaining === 0 ? "Tiempo terminado" : "En pausa"}</small>
+            <small class="timer-creator">${timer.created_by === state.current_user_id ? "Creado por ti" : "Creado por otro amarillo"}</small>
+        </div>
+        ${timer.created_by === state.current_user_id
+            ? `<div class="station-timer-actions">
+                <button class="button button-small" data-timer-action="${running ? "pause" : "start"}" data-timer-id="${timer.id}">${running ? "Pausar" : "Iniciar"}</button>
+                <button class="button button-small" data-timer-action="reset" data-timer-id="${timer.id}">Reiniciar</button>
+                <button class="text-button" data-delete-timer="${timer.id}">Borrar</button>
+            </div>`
+            : `<small class="timer-owner-hint">Solo quien lo creó puede controlarlo.</small>`}
+    </div>`;
+}
+
 function renderAdmin(state) {
     currentAdminState = state;
-    syncClock(state.timer);
-    const timer = state.timer;
-    const durationMinutes = Math.round(timer.duration_seconds / 60);
-    const activeTeam = state.teams.find((team) => team.slug === timer.active_team)?.slug || state.teams[0]?.slug || "";
-    const activeStation = timer.active_station || state.stations[0]?.id || "";
+    startTimerClocks();
     app.innerHTML = `
         <div class="admin-page">
             <header class="topbar">
@@ -397,32 +494,25 @@ function renderAdmin(state) {
                 <div><div class="eyebrow">CENTRO DE CONTROL</div><h1>La dinámica, en tus manos.</h1><p>Prepara temas y pistas; libera cada pista cuando el grupo responda bien.</p></div>
                 <button class="button button-outline" id="reset-button">↻ Reiniciar dinámica</button>
             </section>
-            <section class="control-grid">
-                <article class="control-card timer-card">
-                    <div class="section-kicker">01 · TIEMPO</div>
-                    <div class="timer-display" id="admin-timer">${formatTime(timer.remaining_seconds)}</div>
-                    <div class="timer-state" id="timer-state">${timer.is_running ? "Temporizador en marcha" : "Temporizador detenido"}</div>
-                    <div class="timer-actions">
-                        <button class="button button-dark" id="timer-toggle">${timer.is_running ? "Pausar" : "Iniciar"} <span>${timer.is_running ? "Ⅱ" : "▶"}</span></button>
-                        <button class="button button-outline" id="timer-reset">Reiniciar reloj</button>
-                    </div>
-                    <div class="duration-control"><label for="timer-duration">Duración</label><div class="duration-input"><input id="timer-duration" type="number" min="1" max="60" value="${durationMinutes}"><span>min</span><button class="button button-small" id="duration-save">Aplicar</button></div></div>
-                </article>
-                <article class="control-card focus-card">
-                    <div class="section-kicker">02 · ESTACIÓN ACTIVA</div>
-                    <h2>¿A quién estás atendiendo?</h2>
-                    <p class="muted">Selecciona un grupo y una estación para tenerlos a mano.</p>
-                    <label for="focus-team">Grupo</label>
-                    <select id="focus-team">${state.teams.map((team) => `<option value="${escapeHtml(team.slug)}" ${team.slug === activeTeam ? "selected" : ""}>${escapeHtml(team.name)}</option>`).join("")}</select>
-                    <label for="focus-station">Estación</label>
-                    <select id="focus-station">${state.stations.map((station) => `<option value="${station.id}" ${Number(station.id) === Number(activeStation) ? "selected" : ""}>${escapeHtml(station.name)}</option>`).join("")}</select>
-                    <button class="button button-outline button-wide" id="focus-save">Guardar estación activa</button>
-                </article>
+            <section class="timer-management">
+                <div class="section-heading">
+                    <div><div class="section-kicker">01 · TIEMPOS POR ESTACIÓN</div><h2>Temporizadores de los grupos</h2><p>Crea un reloj para cada grupo en cada estación. Solo quien lo creó puede controlarlo.</p></div>
+                    <label class="new-timer-duration" for="new-timer-duration">Duración inicial
+                        <span><input id="new-timer-duration" type="number" min="1" max="60" value="5"><span>minutos</span></span>
+                    </label>
+                </div>
+                <p class="timer-ownership-note">Los relojes activos se muestran aquí y en la estación correspondiente de la vista del grupo.</p>
+                <div class="timer-team-grid">${state.teams.map((team) => `
+                    <article class="timer-team-card" style="--team-color:${escapeHtml(team.color)}">
+                        <div class="release-team"><span class="team-dot"></span><h3>${escapeHtml(team.name)}</h3></div>
+                        <div class="timer-station-list">${state.stations.map((station) => renderStationTimer(team, station, state)).join("")}</div>
+                    </article>`).join("")}</div>
             </section>
             <section class="setup-section">
                 <div class="section-heading"><div><div class="section-kicker">03 · PREPARACIÓN</div><h2>Temas, estaciones y pistas</h2><p>Crea pistas útiles para el tema de cada grupo y la sección que están trabajando.</p></div><button class="button button-dark" id="save-setup">Guardar preparación <span>↓</span></button></div>
                 <div class="teams-setup">${state.teams.map((team) => renderTeamSetup(team, state.stations)).join("")}</div>
-                <div class="station-setup"><div class="subsection-title"><h3>Estaciones</h3><span>5 paradas · editables</span></div>
+                <details class="station-setup" id="station-setup-details" ${stationEditorExpanded ? "open" : ""}>
+                    <summary class="subsection-title"><h3>Estaciones</h3><span>5 paradas · editables</span></summary>
                     <div class="station-editor-list">${state.stations.map((station) => `
                         <article class="station-editor">
                             <span class="station-number">${String(station.sort_order).padStart(2, "0")}</span>
@@ -441,7 +531,7 @@ function renderAdmin(state) {
                             </div>
                         </article>`).join("")}
                     </div>
-                </div>
+                </details>
             </section>
             <section class="release-section">
                 <div class="section-heading"><div><div class="section-kicker">04 · ENTREGA DE PISTAS</div><h2>Libera cuando respondan bien</h2><p>La pista aparece al instante en la vista del grupo correspondiente.</p></div></div>
@@ -470,47 +560,52 @@ function renderAdmin(state) {
                         }).join("")}</div>
                     </article>`).join("")}</div>
             </section>
-            <footer class="admin-footer"><span>Los cambios se sincronizan con los grupos automáticamente.</span><button class="text-button" id="reset-button-bottom">Reiniciar todas las pistas y el reloj</button></footer>
+            <footer class="admin-footer"><span>Los cambios se sincronizan con los grupos automáticamente.</span><button class="text-button" id="reset-button-bottom">Reiniciar dinámica</button></footer>
         </div>
         <div id="toast" class="toast" role="status" aria-live="polite"></div>`;
 
     document.querySelector("#logout-button").addEventListener("click", async () => {
         try {
             await api("logout", {});
+            stopLiveUpdates();
             renderLogin();
         } catch (error) { notify(error.message, "error"); }
     });
+    const stationDetails = document.querySelector("#station-setup-details");
+    stationDetails.addEventListener("toggle", () => {
+        stationEditorExpanded = stationDetails.open;
+    });
     document.querySelector("#save-setup").addEventListener("click", saveSetup);
-    document.querySelector("#duration-save").addEventListener("click", async () => {
-        const minutes = Number(document.querySelector("#timer-duration").value);
+    document.querySelectorAll("#reset-button, #reset-button-bottom").forEach((button) => button.addEventListener("click", resetProgress));
+    document.querySelectorAll("[data-create-timer]").forEach((button) => button.addEventListener("click", async () => {
+        const minutes = Number(document.querySelector("#new-timer-duration").value);
         if (!Number.isInteger(minutes) || minutes < 1 || minutes > 60) {
             notify("Elige una duración entre 1 y 60 minutos.", "error");
             return;
         }
         try {
-            await api("timer", { operation: "set", duration_seconds: minutes * 60 });
-            notify("Duración actualizada.");
-            await loadAdmin();
-        } catch (error) { notify(error.message, "error"); }
-    });
-    document.querySelector("#timer-toggle").addEventListener("click", async () => {
-        try {
-            await api("timer", { operation: timer.is_running ? "pause" : "start" });
-            await loadAdmin();
-        } catch (error) { notify(error.message, "error"); }
-    });
-    document.querySelector("#timer-reset").addEventListener("click", () => timerAction("reset"));
-    document.querySelectorAll("#reset-button, #reset-button-bottom").forEach((button) => button.addEventListener("click", resetProgress));
-    document.querySelector("#focus-save").addEventListener("click", async () => {
-        try {
-            await api("focus", {
-                team_slug: document.querySelector("#focus-team").value,
-                station_id: Number(document.querySelector("#focus-station").value),
+            await api("create_station_timer", {
+                team_slug: button.dataset.createTimer,
+                station_id: Number(button.dataset.station),
+                duration_seconds: minutes * 60,
             });
-            notify("Estación activa actualizada.");
+            notify("Temporizador creado. Solo tú puedes controlarlo.");
             await loadAdmin();
         } catch (error) { notify(error.message, "error"); }
-    });
+    }));
+    document.querySelectorAll("[data-timer-action]").forEach((button) => button.addEventListener("click", async () => {
+        try {
+            await api("station_timer", { id: button.dataset.timerId, operation: button.dataset.timerAction });
+            await loadAdmin();
+        } catch (error) { notify(error.message, "error"); }
+    }));
+    document.querySelectorAll("[data-delete-timer]").forEach((button) => button.addEventListener("click", async () => {
+        if (!window.confirm("¿Borrar este temporizador de la estación?")) return;
+        try {
+            await api("delete_station_timer", { id: button.dataset.deleteTimer });
+            await loadAdmin();
+        } catch (error) { notify(error.message, "error"); }
+    }));
     document.querySelectorAll("[data-release]").forEach((button) => button.addEventListener("click", async () => {
         try {
             await api("release_hint", { team_slug: button.dataset.release, station_id: Number(button.dataset.station) });
@@ -586,15 +681,8 @@ async function saveSetup() {
     } catch (error) { notify(error.message, "error"); }
 }
 
-async function timerAction(operation) {
-    try {
-        await api("timer", { operation });
-        await loadAdmin();
-    } catch (error) { notify(error.message, "error"); }
-}
-
 async function resetProgress() {
-    if (!window.confirm("Se volverán a ocultar todas las pistas y el temporizador regresará a su duración inicial. ¿Continuar?")) return;
+    if (!window.confirm("Se volverán a ocultar todas las pistas. Los temporizadores por estación no se modificarán. ¿Continuar?")) return;
     try {
         await api("reset_progress", {});
         setupDirty = false;
@@ -616,18 +704,7 @@ async function startAdmin() {
             return;
         }
         await loadAdmin();
-        pollHandle = window.setInterval(async () => {
-            try {
-                const state = await api("state");
-                if (!setupDirty && document.activeElement?.tagName !== "TEXTAREA" && document.activeElement?.tagName !== "INPUT") {
-                    renderAdmin(state);
-                } else {
-                    syncClock(state.timer);
-                }
-            } catch (error) {
-                if (error.message.includes("Inicia sesión")) renderLogin();
-            }
-        }, 2000);
+        startLiveUpdates();
     } catch (error) {
         app.innerHTML = `<section class="error-screen"><h1>No pudimos conectar</h1><p>${escapeHtml(error.message)}</p><a class="button button-dark" href="./">Volver al inicio</a></section>`;
     }
@@ -648,12 +725,22 @@ function renderTeamShell(team, stations) {
             </section>
             <section class="team-progress">
                 <div><div class="section-kicker">ESTACIONES</div><h2>Construyan su investigación</h2><p>Las pistas aparecerán aquí cuando el equipo amarillo las libere.</p></div>
-                <aside class="team-clock"><span>TIEMPO DE LA RONDA</span><strong id="team-timer">--:--</strong><small id="team-timer-state">Esperando al equipo amarillo</small></aside>
             </section>
             <section class="station-grid">${stations.map((station) => `
                 <article class="team-station ${station.is_unlocked ? "is-unlocked" : ""}" data-station="${station.id}">
                     <div class="station-topline"><span class="station-number">${String(station.sort_order).padStart(2, "0")}</span><span class="station-status">${station.is_unlocked ? "PISTA DESBLOQUEADA" : "PENDIENTE"}</span></div>
                     <h3>${escapeHtml(station.name)}</h3><p class="station-format">${escapeHtml(station.format)}</p>
+                    <div class="team-station-timer"><span>TEMPORIZADOR DE ESTA ESTACIÓN</span><strong class="station-timer-clock" data-timer-clock data-has-timer="${Boolean(station.timer)}" data-running="${station.timer?.is_running && station.timer.ends_at && Date.parse(station.timer.ends_at) > currentTimeMs()}" data-ends-at="${escapeHtml(station.timer?.ends_at || "")}" data-remaining-seconds="${station.timer?.remaining_seconds || 0}">${formatTime(station.timer
+                        ? station.timer.is_running && station.timer.ends_at
+                            ? Math.max(0, Math.ceil((Date.parse(station.timer.ends_at) - currentTimeMs()) / 1000))
+                            : station.timer.remaining_seconds
+                        : 0)}</strong><small data-timer-state>${station.timer
+                            ? station.timer.is_running && station.timer.ends_at && Date.parse(station.timer.ends_at) > currentTimeMs()
+                                ? "En marcha"
+                                : Number(station.timer.remaining_seconds) === 0
+                                    ? "Tiempo terminado"
+                                    : "En pausa"
+                            : "Aún no creado"}</small></div>
                     <div class="question-box"></div>
                     <button class="button button-dark request-hint-button" data-request="${station.id}" disabled></button>
                     <div class="hint-box"></div>
@@ -676,7 +763,7 @@ function renderTeamShell(team, stations) {
 }
 
 function updateTeamView(state) {
-    syncClock(state.timer);
+    startTimerClocks();
     const topic = document.querySelector("#team-topic");
     if (topic) topic.textContent = state.team.topic || "Su tema todavía no ha sido asignado. Consulten con el equipo amarillo.";
     state.stations.forEach((station) => {
@@ -684,6 +771,7 @@ function updateTeamView(state) {
         if (!card) return;
         card.querySelector("h3").textContent = station.name;
         card.querySelector(".station-format").textContent = station.format;
+        updateTimerClock(card.querySelector("[data-timer-clock]"), station.timer);
         const unlocked = station.is_unlocked && station.hint;
         const questionBox = card.querySelector(".question-box");
         questionBox.innerHTML = station.hint_enabled
@@ -711,14 +799,7 @@ async function startTeam() {
         const initial = await api("state", null, { color });
         renderTeamShell(initial.team, initial.stations);
         updateTeamView(initial);
-        pollHandle = window.setInterval(async () => {
-            try {
-                const state = await api("state", null, { color });
-                updateTeamView(state);
-            } catch (error) {
-                notify(error.message, "error");
-            }
-        }, 2000);
+        startLiveUpdates();
     } catch (error) {
         app.innerHTML = `<section class="error-screen"><a class="back-link" href="./">← Inicio</a><h1>Grupo no disponible</h1><p>${escapeHtml(error.message)}</p></section>`;
     }
@@ -735,4 +816,5 @@ if (view === "amarillos") {
 window.addEventListener("pagehide", () => {
     window.clearInterval(pollHandle);
     window.clearInterval(clockHandle);
+    stopLiveUpdates();
 });

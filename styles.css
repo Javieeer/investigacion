@@ -74,19 +74,26 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
 .admin-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 40px 0 26px; }
 .admin-heading h1 { margin: 8px 0 7px; font-size: clamp(26px, 4vw, 36px); letter-spacing: -.05em; }
 .admin-heading p { margin: 0; color: var(--muted); font-size: 13px; }
-.control-grid { display: grid; grid-template-columns: .9fr 1.1fr; gap: 14px; }
-.control-card { border: 1px solid var(--line); border-radius: 14px; background: var(--card); padding: 22px; }
-.timer-display { margin: 8px 0 0; font-family: "Trebuchet MS", sans-serif; font-size: 53px; font-weight: 800; letter-spacing: -.06em; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.timer-state { margin: 3px 0 15px; color: var(--muted); font-size: 11px; }
-.timer-actions { display: flex; gap: 8px; }
-.duration-control { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line); }
-.duration-input { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-.duration-input input { width: 67px; padding: 7px 9px; }
-.focus-card h2 { margin: 9px 0 5px; font-size: 18px; letter-spacing: -.03em; }
-.focus-card .muted { margin-bottom: 14px; }
-.focus-card label { display: block; margin: 10px 0 6px; }
-.focus-card select { padding: 9px 10px; }
-.focus-card .button { margin-top: 13px; }
+.timer-management { margin-top: 22px; border: 1px solid var(--line); border-radius: 13px; background: var(--card); padding: 20px; }
+.timer-management .section-heading { align-items: center; margin-bottom: 8px; }
+.timer-management .section-heading h2 { margin: 7px 0 5px; font-size: 21px; }
+.new-timer-duration { display: grid; gap: 6px; min-width: 150px; color: #454c42; font-size: 11px; font-weight: 700; }
+.new-timer-duration > span { display: flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 400; }
+.new-timer-duration input { width: 76px; padding: 8px; }
+.timer-ownership-note { margin: 0; color: var(--muted); font-size: 11px; }
+.timer-team-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 15px; }
+.timer-team-card { min-width: 0; border: 1px solid var(--line); border-top: 3px solid var(--team-color); border-radius: 10px; background: #fff; padding: 13px; }
+.timer-team-card .release-team { margin-bottom: 8px; }
+.timer-station-list { border-top: 1px solid var(--line); }
+.timer-station-row { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #f0eee8; padding: 7px 0; }
+.timer-station-row:last-child { border-bottom: 0; }
+.timer-station-info { display: grid; min-width: 0; grid-template-columns: auto auto; align-items: baseline; gap: 2px 8px; }
+.timer-station-name { grid-column: 1 / -1; color: #454c42; font-size: 10px; font-weight: 700; }
+.timer-station-info .station-timer-clock { font-size: 19px; }
+.timer-station-info small, .timer-owner-hint { color: var(--muted); font-size: 9px; }
+.timer-station-info .timer-creator { grid-column: 1 / -1; }
+.timer-station-actions { justify-content: flex-end; }
+.timer-owner-hint { max-width: 110px; text-align: right; }
 .setup-section, .release-section { padding-top: 40px; }
 .section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
 .section-heading h2 { margin: 7px 0 5px; font-size: 24px; letter-spacing: -.04em; }
@@ -102,6 +109,12 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
 .hint-fields { display: grid; gap: 11px; margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--line); }
 .hint-fields-title { color: var(--green); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .station-setup { margin-top: 25px; }
+.station-setup > summary { list-style: none; cursor: pointer; }
+.station-setup > summary::-webkit-details-marker { display: none; }
+.station-setup > summary::after { margin-left: auto; color: var(--green); content: "+"; font-size: 19px; font-weight: 700; }
+.station-setup[open] > summary::after { content: "−"; }
+.station-setup:not([open]) > summary { margin-bottom: 0; }
+.station-setup > summary:focus-visible { border-radius: 5px; outline: 2px solid #77937c; outline-offset: 4px; }
 .subsection-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
 .subsection-title h3 { margin: 0; font-size: 16px; }
 .subsection-title span { color: var(--muted); font-size: 10px; }
@@ -120,6 +133,17 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
 .release-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid #f0eee8; padding: 9px 0; }
 .release-station { border-bottom: 1px solid #f0eee8; padding: 3px 0 11px; }
 .release-station .release-row { border-bottom: 0; }
+.station-timer-panel { margin: 6px 0 9px; border-radius: 8px; background: #f5f4ee; padding: 10px; }
+.station-timer-heading, .station-timer-readout { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.station-timer-heading strong { color: #454c42; font-size: 10px; }
+.station-timer-owner { color: var(--muted); font-size: 9px; }
+.station-timer-readout { margin: 5px 0; }
+.station-timer-clock { font-family: "Trebuchet MS", sans-serif; font-size: 21px; font-variant-numeric: tabular-nums; font-weight: 800; }
+.station-timer-readout small, .timer-owner-hint { color: var(--muted); font-size: 9px; }
+.station-timer-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.station-timer-actions .button { min-height: 29px; font-size: 9px; padding: 5px 8px; }
+.station-timer-actions .text-button { margin-left: auto; font-size: 9px; }
+.station-timer-panel > .button { width: 100%; margin-top: 6px; }
 .release-row > span { display: grid; gap: 3px; }
 .release-row strong { font-size: 10px; }
 .release-row small { color: var(--muted); font-size: 9px; }
@@ -143,10 +167,6 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
 .team-progress { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 25px 0 15px; }
 .team-progress h2 { margin: 6px 0 4px; font-size: 21px; letter-spacing: -.04em; }
 .team-progress p { margin: 0; color: var(--muted); font-size: 11px; }
-.team-clock { display: grid; min-width: 145px; justify-items: end; }
-.team-clock span { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .08em; }
-.team-clock strong { font-family: "Trebuchet MS", sans-serif; font-size: 31px; font-variant-numeric: tabular-nums; letter-spacing: -.05em; }
-.team-clock small { color: var(--muted); font-size: 10px; }
 .station-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
 .team-station { min-width: 0; border: 1px solid var(--line); border-radius: 13px; background: var(--card); padding: 16px; transition: border-color .2s, box-shadow .2s; }
 .team-station.is-unlocked { border-color: color-mix(in srgb, var(--team-color) 45%, white); box-shadow: 0 5px 20px color-mix(in srgb, var(--team-color) 9%, transparent); }
@@ -156,6 +176,10 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
 .team-station.is-unlocked .station-status { color: var(--team-color); }
 .team-station h3 { margin: 15px 0 4px; font-size: 16px; letter-spacing: -.03em; }
 .station-format { min-height: 17px; margin: 0; color: var(--muted); font-size: 10px; }
+.team-station-timer { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 3px 10px; margin-top: 12px; border-radius: 8px; background: #f5f4ee; padding: 9px 11px; }
+.team-station-timer > span { color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: .06em; }
+.team-station-timer .station-timer-clock { grid-column: 2; grid-row: 1 / span 2; font-size: 23px; }
+.team-station-timer small { color: var(--muted); font-size: 9px; }
 .question-box { margin-top: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fffefa; padding: 12px; }
 .question-box > span { color: var(--team-color); font-size: 9px; font-weight: 800; letter-spacing: .07em; }
 .question-box p { margin: 6px 0 8px; font-size: 11px; font-weight: 700; line-height: 1.5; }
@@ -176,7 +200,7 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
 @media (max-width: 800px) {
     .landing-grid { grid-template-columns: repeat(2, 1fr); }
     .portal-card { min-height: 155px; }
-    .teams-setup, .release-grid { grid-template-columns: 1fr; }
+    .teams-setup, .release-grid, .timer-team-grid { grid-template-columns: 1fr; }
     .team-setup-card { padding: 17px; }
     .station-grid { grid-template-columns: repeat(2, 1fr); }
 }
@@ -191,8 +215,8 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
     .role-pill { font-size: 9px; padding: 6px 8px; }
     .topbar-actions { gap: 3px; }
     .admin-heading { align-items: flex-start; flex-direction: column; padding: 28px 0 19px; }
-    .control-grid { grid-template-columns: 1fr; }
-    .control-card { padding: 17px; }
+    .timer-management { padding: 15px; }
+    .timer-management .section-heading { align-items: flex-start; flex-direction: column; }
     .section-heading { align-items: flex-start; flex-direction: column; }
     .section-heading h2 { font-size: 21px; }
     .station-fields { grid-template-columns: 1fr; }
@@ -201,8 +225,6 @@ code { border-radius: 4px; background: #eeece4; padding: 2px 5px; font-size: 11p
     .team-hero { padding-top: 20px; }
     .team-progress { align-items: flex-start; }
     .team-progress h2 { font-size: 18px; }
-    .team-clock { min-width: auto; }
-    .team-clock strong { font-size: 25px; }
     .station-grid { grid-template-columns: 1fr; }
     .team-station { padding: 15px; }
     .hint-box { min-height: 75px; }

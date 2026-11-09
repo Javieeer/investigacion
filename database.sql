@@ -71,6 +71,73 @@ CREATE TABLE IF NOT EXISTS public.dynamics (
     active_station SMALLINT REFERENCES public.stations (id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS public.station_timers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_slug TEXT NOT NULL REFERENCES public.teams (slug) ON DELETE CASCADE,
+    station_id SMALLINT NOT NULL REFERENCES public.stations (id) ON DELETE CASCADE,
+    created_by UUID NOT NULL REFERENCES auth.users (id) ON DELETE RESTRICT,
+    duration_seconds INTEGER NOT NULL CHECK (duration_seconds BETWEEN 60 AND 3600),
+    remaining_seconds INTEGER NOT NULL CHECK (remaining_seconds BETWEEN 0 AND 3600),
+    ends_at TIMESTAMPTZ,
+    is_running BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (team_slug, station_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.station_timer_status (
+    id UUID PRIMARY KEY REFERENCES public.station_timers (id) ON DELETE CASCADE,
+    team_slug TEXT NOT NULL REFERENCES public.teams (slug) ON DELETE CASCADE,
+    station_id SMALLINT NOT NULL REFERENCES public.stations (id) ON DELETE CASCADE,
+    duration_seconds INTEGER NOT NULL,
+    remaining_seconds INTEGER NOT NULL,
+    ends_at TIMESTAMPTZ,
+    is_running BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION public.sync_station_timer_status()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        DELETE FROM public.station_timer_status WHERE id = OLD.id;
+        RETURN OLD;
+    END IF;
+
+    INSERT INTO public.station_timer_status (
+        id, team_slug, station_id, duration_seconds, remaining_seconds, ends_at, is_running, created_at
+    ) VALUES (
+        NEW.id, NEW.team_slug, NEW.station_id, NEW.duration_seconds, NEW.remaining_seconds,
+        NEW.ends_at, NEW.is_running, NEW.created_at
+    )
+    ON CONFLICT (id) DO UPDATE SET
+        team_slug = EXCLUDED.team_slug,
+        station_id = EXCLUDED.station_id,
+        duration_seconds = EXCLUDED.duration_seconds,
+        remaining_seconds = EXCLUDED.remaining_seconds,
+        ends_at = EXCLUDED.ends_at,
+        is_running = EXCLUDED.is_running,
+        created_at = EXCLUDED.created_at;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sync_station_timer_status ON public.station_timers;
+CREATE TRIGGER sync_station_timer_status
+    AFTER INSERT OR UPDATE OR DELETE ON public.station_timers
+    FOR EACH ROW EXECUTE FUNCTION public.sync_station_timer_status();
+
+CREATE OR REPLACE FUNCTION public.get_server_time()
+RETURNS TIMESTAMPTZ
+LANGUAGE SQL
+STABLE
+AS $$
+    SELECT NOW();
+$$;
+
 CREATE OR REPLACE FUNCTION public.is_admin()
 RETURNS BOOLEAN
 LANGUAGE SQL
@@ -95,6 +162,8 @@ ALTER TABLE public.hint_releases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.hint_access ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.hint_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.dynamics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.station_timers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.station_timer_status ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Admins can read their own admin record" ON public.admin_users;
 CREATE POLICY "Admins can read their own admin record"
@@ -217,10 +286,36 @@ CREATE POLICY "Admins can update dynamics"
     ON public.dynamics FOR UPDATE TO authenticated
     USING ((SELECT public.is_admin())) WITH CHECK ((SELECT public.is_admin()));
 
+DROP POLICY IF EXISTS "Admins can read station timers" ON public.station_timers;
+CREATE POLICY "Admins can read station timers"
+    ON public.station_timers FOR SELECT TO authenticated
+    USING ((SELECT public.is_admin()));
+DROP POLICY IF EXISTS "Admins can create their own station timers" ON public.station_timers;
+CREATE POLICY "Admins can create their own station timers"
+    ON public.station_timers FOR INSERT TO authenticated
+    WITH CHECK ((SELECT public.is_admin()) AND created_by = (SELECT auth.uid()));
+DROP POLICY IF EXISTS "Creators can update their station timers" ON public.station_timers;
+CREATE POLICY "Creators can update their station timers"
+    ON public.station_timers FOR UPDATE TO authenticated
+    USING ((SELECT public.is_admin()) AND created_by = (SELECT auth.uid()))
+    WITH CHECK ((SELECT public.is_admin()) AND created_by = (SELECT auth.uid()));
+DROP POLICY IF EXISTS "Creators can delete their station timers" ON public.station_timers;
+CREATE POLICY "Creators can delete their station timers"
+    ON public.station_timers FOR DELETE TO authenticated
+    USING ((SELECT public.is_admin()) AND created_by = (SELECT auth.uid()));
+
+DROP POLICY IF EXISTS "Anyone can read station timer status" ON public.station_timer_status;
+CREATE POLICY "Anyone can read station timer status"
+    ON public.station_timer_status FOR SELECT TO anon, authenticated USING (TRUE);
+
 REVOKE ALL ON FUNCTION public.is_admin() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.is_admin() TO anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_server_time() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_server_time() TO anon, authenticated;
+REVOKE ALL ON FUNCTION public.sync_station_timer_status() FROM PUBLIC;
 
 GRANT SELECT ON public.teams, public.stations, public.hint_releases, public.dynamics TO anon, authenticated;
+GRANT SELECT ON public.station_timer_status TO anon, authenticated;
 GRANT SELECT ON public.station_questions, public.hint_access, public.hint_requests TO anon, authenticated;
 GRANT SELECT ON public.hints TO anon, authenticated;
 GRANT SELECT ON public.admin_users TO authenticated;
@@ -228,6 +323,22 @@ GRANT UPDATE ON public.teams, public.stations, public.hints, public.hint_release
 GRANT UPDATE ON public.station_questions, public.station_answers, public.hint_access, public.hint_requests TO authenticated;
 GRANT SELECT ON public.station_answers TO authenticated;
 GRANT UPDATE (requested, requested_at) ON public.hint_requests TO anon;
+GRANT SELECT, INSERT, DELETE ON public.station_timers TO authenticated;
+GRANT UPDATE (remaining_seconds, ends_at, is_running) ON public.station_timers TO authenticated;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime')
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_publication_tables
+           WHERE pubname = 'supabase_realtime'
+             AND schemaname = 'public'
+             AND tablename = 'station_timer_status'
+       ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.station_timer_status;
+    END IF;
+END;
+$$;
 
 INSERT INTO public.teams (slug, name, color, topic, sort_order) VALUES
     ('salmones', 'Los salmones', '#df866f', '', 1),
