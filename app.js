@@ -499,7 +499,7 @@ function renderAdmin(state) {
                 <div class="section-heading">
                     <div><div class="section-kicker">01 · TIEMPOS POR ESTACIÓN</div><h2>Temporizadores de los grupos</h2><p>Crea un reloj para cada grupo en cada estación. Solo quien lo creó puede controlarlo.</p></div>
                     <label class="new-timer-duration" for="new-timer-duration">Duración inicial
-                        <span><input id="new-timer-duration" type="number" min="1" max="60" value="5"><span>minutos</span></span>
+                        <span><input id="new-timer-duration" type="number" min="1" max="60" value="2"><span>minutos</span></span>
                     </label>
                 </div>
                 <p class="timer-ownership-note">Los relojes activos se muestran aquí y en la estación correspondiente de la vista del grupo.</p>
